@@ -2,55 +2,129 @@ package com.example.jobpotral2.service;
 
 import java.util.List;
 
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import com.example.jobpotral2.model.Application;
-import com.example.jobpotral2.model.Job;
-import com.example.jobpotral2.model.User;
+import com.example.jobpotral2.entity.JobApplication;
+import com.example.jobpotral2.dto.ApplicationRequest;
+import com.example.jobpotral2.dto.ApplicationResponse;
+import com.example.jobpotral2.entity.Job;
+import com.example.jobpotral2.entity.User;
+import com.example.jobpotral2.enums.ApplicationStatus;
 import com.example.jobpotral2.repo.ApplicationRepo;
 import com.example.jobpotral2.repo.JobRepo;
 import com.example.jobpotral2.repo.UserRepo;
+import com.example.jobpotral2.security.BadRequestException;
+import com.example.jobpotral2.security.ResourceNotFoundException;
+import com.example.jobpotral2.security.UnauthorizedException;
+
+import lombok.RequiredArgsConstructor;
 
 @Service
+@RequiredArgsConstructor
 public class ApplicationServiceImpl implements ApplicationService {
 
-    @Autowired
-    private JobRepo jobRepo;
+    private final JobRepo jobRepo;
 
-    @Autowired
-    private UserRepo userRepo;
+    private final UserRepo userRepo;
 
-    @Autowired
-    private ApplicationRepo applicationRepo;
+    private final ApplicationRepo applicationRepo;
 
     @Override
-    public Application applyForJob(Long JobId, Long UserId) {
-        Job job = jobRepo.findById(JobId).orElse(null);
-        User user = userRepo.findById(UserId).orElse(null);
+    public ApplicationResponse applyForJob(ApplicationRequest request, String applicantEmail) {
+        User applicant = getUser(applicantEmail);
+        Job job = getJob(request.jobId());
 
-        if (job == null) {
-            throw new RuntimeException("job not found");
-        } else if (user == null) {
-            throw new RuntimeException("User not found");
-        } else {
-            Application application = new Application();
-
-            application.setJob(job);
-            application.setJobSeeker(user);
-            return applicationRepo.save(application);
+        if (!job.isActive()) {
+            throw new BadRequestException("This job is no longer accepting applications");
         }
 
+        if (applicationRepo.existsByJobAndApplicant(job, applicant)) {
+            throw new BadRequestException("You have already applied for this job");
+        }
+
+        JobApplication application = JobApplication.builder()
+                .job(job)
+                .applicant(applicant)
+                .coverLetter(request.coverLetter())
+                .resumeUrl(request.resumeUrl() != null ? request.resumeUrl() : applicant.getResumeUrl())
+                .status(ApplicationStatus.PENDING)
+                .build();
+
+        return ApplicationResponse.from(applicationRepo.save(application));
+
     }
 
     @Override
-    public List<Application> getApplicants(Long JobId) {
-        return applicationRepo.findByJobId(JobId);
+    public List<ApplicationResponse> getMyApplications(String applicantEmail) {
+        User applicant = getUser(applicantEmail);
+        return applicationRepo.findByApplicant(applicant).stream().map(ApplicationResponse::from).toList();
     }
 
     @Override
-    public List<Application> getAppliedJobs(Long UserId) {
-        return applicationRepo.findByJobSeekerId(UserId);
+    public List<ApplicationResponse> getApplicationsForJob(Long jobId, String employerEmail) {
+        User employer = getUser(employerEmail);
+        Job job = getJob(jobId);
+
+        if (!job.getPostedBy().getId().equals(employer.getId())) {
+            throw new UnauthorizedException("You don't own this job");
+        }
+
+        return applicationRepo.findByJob(job).stream().map(ApplicationResponse::from).toList();
+    }
+
+    @Override
+    public List<ApplicationResponse> getAllApplicationsForEmployer(String employerEmail) {
+        User employer = getUser(employerEmail);
+        return applicationRepo.findAllByEmployer(employer).stream().map(ApplicationResponse::from).toList();
+    }
+
+    @Override
+    public ApplicationResponse updateApplicationStatus(Long applicationId, ApplicationStatus status,
+            String employerNotes, String employerEmail) {
+        User employer = getUser(employerEmail);
+        JobApplication application = getApplication(applicationId);
+
+        if (!application.getJob().getPostedBy().getId().equals(employer.getId())) {
+            throw new UnauthorizedException("You don't have permission to update this application");
+        }
+
+        application.setStatus(status);
+        if (employerNotes != null) {
+            application.setEmployerNotes(employerNotes);
+        }
+
+        return ApplicationResponse.from(applicationRepo.save(application));
+    }
+
+    @Override
+    public void withdrawApplication(Long applicationId, String applicantEmail) {
+        User applicant = getUser(applicantEmail);
+        JobApplication application = getApplication(applicationId);
+
+        if (!application.getApplicant().getId().equals(applicant.getId())) {
+            throw new UnauthorizedException("You can only withdraw your own application");
+        }
+
+        if (application.getStatus() != ApplicationStatus.PENDING) {
+            throw new BadRequestException("Cannot withdraw an application that has already been processed");
+        }
+
+        applicationRepo.delete(application);
+    }
+
+    private User getUser(String email) {
+        return userRepo.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + email));
+    }
+
+    private Job getJob(Long id) {
+        return jobRepo.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Job not found with id: " + id));
+    }
+
+    private JobApplication getApplication(Long id) {
+        return applicationRepo.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Application not found with id: " + id));
     }
 
 }
